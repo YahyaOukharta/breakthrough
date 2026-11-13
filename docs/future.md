@@ -1,16 +1,15 @@
 # Future work
 
-State at the time of writing: v3.0 is #1 by a margin inside arena noise. Search margins
-are on a plateau and a 384 net is saturated by the data, so the next gain has to come
-from a bigger evaluation or a structurally different idea.
+State at the time of writing: v3.1 is #1. Search margins are on a plateau; evaluation
+capacity is the lever that still pays.
 
 ## In progress / first in line
 
-- [ ] **Wider net.** A 512-wide net (4 buckets, 4 buckets, 166M unique positions) has
-  the best validation loss so far (0.4904 vs 0.4937 for 384), but 512 untied is 107k
-  characters and ~29% slower. First real-time gate (400 games, 100 ms): **+33 ± 34** vs v3.0,
-  promising but not proven. Train **512 and 640 mirror-tied** (`train.py --sym`), pack
-  with `pack.py -S` (half storage, fits), and gate at 100 ms per move, not fixed nodes.
+- [x] **Wider net.** Done in v3.1: 512 and 640 mirror-tied both beat 384 at real time
+  (+42, +52), stored at half size with `pack.py -S`.
+- [ ] **Wider still.** 768 tied (~90k chars) and 896 tied (~98k) fit; validation loss was
+  still falling at 640 (0.4937 → 0.4901 → 0.4872).
+- [ ] **New data from the 640 teacher.** A stronger teacher was worth more than volume before.
 - [ ] **Speed for wide nets.** The cost of width is the output layer and the accumulator
   update. Try: evaluation cache keyed by hash, int8 output weights, updating both
   perspectives in one pass, pairwise multiplication instead of SCReLU.

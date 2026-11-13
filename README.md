@@ -4,8 +4,8 @@ A bot for the [CodinGame Breakthrough arena](https://www.codingame.com/multiplay
 bitboard alpha-beta search with a small NNUE-style neural evaluation, trained from
 self-play, all in one C++ file under the 100k-character limit.
 
-**Result:** rank **1 / 381** (score 44.25) on 2026-11-13 as `yhyoxx`, version `v3.0`
-([`versions/v3.0.cpp`](versions/v3.0.cpp) is the submitted source, without its weights).
+**Result:** rank **1 / 381** on 2026-11-13 as `yhyoxx` (v3.0: 44.25, then v3.1: 44.23 with a
+wider lead). [`versions/v3.1.cpp`](versions/v3.1.cpp) is the submitted source, without its weights).
 
 > The sources in `versions/` do not embed their network weights. The trained nets are
 > kept separately in [`tools/nets/`](tools/nets).
@@ -18,6 +18,7 @@ self-play, all in one C++ file under the 100k-character limit.
 | Six self-play generations, 256 → 384 hidden (v2.7) | 41.13 | 8 |
 | Bigger data, output buckets (v2.8) | 41.49 | 8 |
 | Search upgrades + newest net (v3.0) | 44.25 | 1 |
+| 640 hidden, mirror-tied (v3.1) | 44.23 | 1 |
 
 Full version table: [docs/history.md](docs/history.md).
 
@@ -51,7 +52,7 @@ captures diagonally only. First pawn on the far row wins. 1000 ms for the first 
 - **Search** — iterative deepening PVS with a transposition table, LMR, futility
   prunings, singular extensions, history heuristics. Every feature has a measured Elo.
   → [docs/search.md](docs/search.md)
-- **Evaluation** — 128 inputs → 384 hidden (shared by both perspectives, SCReLU) → 4
+- **Evaluation** — 128 inputs → 640 hidden (shared by both perspectives, mirror-tied, SCReLU) → 4
   output heads picked by pawn count; int16, incrementally updated, AVX2.
   → [docs/nnue.md](docs/nnue.md)
 - **Workflow** — own native referee, a local league, fixed-length gate matches, cloud

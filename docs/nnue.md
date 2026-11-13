@@ -25,6 +25,7 @@ the [Stockfish NNUE guide](https://github.com/official-stockfish/nnue-pytorch/bl
   units, so 200 ≈ one logit.
 
 v3.0 net: 384 hidden, 4 buckets, 52k weights (`tools/nets/n10b.bin`).
+v3.1 net: 640 hidden mirror-tied (320 free units), 4 buckets (`tools/nets/n11e.bin`).
 
 ## Quantization and inference
 
@@ -104,6 +105,8 @@ left-right mirroring is applied as augmentation.
 | 108M → 136M / 216M positions at 384 | 0…+20: **capacity is now the limit** |
 | 512 hidden at 44M positions | +39 at equal nodes but −29% speed: rejected then |
 | 8 buckets instead of 4 (166M positions) | −17 |
+| 512 mirror-tied, 166M unique positions | +42 ± 24 vs 384 at 100 ms |
+| **640 mirror-tied** (v3.1) | **+52 ± 24** vs 384 at 100 ms, +17 vs 512; no speed loss measured on CodinGame |
 
 Rule of thumb seen here: a stronger teacher beats more data from the same teacher; more
 data stops helping once the net is full; then width is the next lever, paid for in speed

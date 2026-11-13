@@ -20,10 +20,12 @@ version (self-play; inflated relative to the arena).
 | v2.7 | 384 hidden | 70% | 41.13 | 8 |
 | v2.8 | 4 output buckets, 108M positions, dedup, 30 epochs cosine; 96 ms | 66.3% | 41.49 | 8 |
 | v2.9 | singular extensions | 63.3% | 41.21 | 7 |
-| **v3.0** | IIR, late move pruning, improving, history upgrade, reverse futility to depth 7; net 10b (136M); 95 ms | +90 Elo at 100 ms | **44.25** | **1** |
+| v3.0 | IIR, late move pruning, improving, history upgrade, reverse futility to depth 7; net 10b (136M); 95 ms | +90 Elo at 100 ms | 44.25 | 1 |
+| **v3.1** | net 11e: 640 hidden, mirror-tied, 166M unique positions; stored at half size (81.6k chars) | +52 Elo at 100 ms (800 games) | **44.23** | **1** |
 
-v3.0 arena run: 72 wins, 18 losses, no timeouts. Margin over #2 was 0.08, inside arena
-noise. All sources (weights removed): [`versions/`](../versions).
+v3.0 arena run: 72 wins, 18 losses, margin over #2 0.08 (inside arena noise). v3.1: again
+72–18, margin 0.25. The arena score is relative, so a stronger bot at the top shows up as
+a wider margin more than as a higher number. All sources (weights removed): [`versions/`](../versions).
 
 ## What mattered, in order
 
@@ -43,7 +45,7 @@ noise. All sources (weights removed): [`versions/`](../versions).
 
 - Tuning the handcrafted eval further.
 - Null move pruning (zugzwang).
-- More data for a 384 net beyond ~110M positions.
+- More data for a 384 net beyond ~110M positions (width was the fix: 512 +42, 640 +52).
 - Best-first minimax as a drop-in replacement for alpha-beta.
 - Margin retuning after v3.0: flat.
 - Learning from arena games: only one's own ~90 games per submission are available.
