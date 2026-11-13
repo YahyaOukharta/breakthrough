@@ -15,4 +15,4 @@ arena/
 tracker/
 
 # float checkpoints stay local
-nets/*.pt
+tools/nets/*.pt

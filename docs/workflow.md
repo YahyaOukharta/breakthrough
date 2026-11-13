@@ -49,7 +49,7 @@ API token in `~/.kaggle/access_token`. The tools create private datasets/kernels
 `bt-*` and keep their working files in `kaggle/` (not tracked).
 
 ```sh
-python3 tools/kaggle_gen.py upload nets/current.bin               # engine + net as a private dataset
+python3 tools/kaggle_gen.py upload tools/nets/current.bin               # engine + net as a private dataset
 python3 tools/kaggle_gen.py push g15 5 4000 15000 current.bin 384 # 5 kernels
 python3 tools/kaggle_gen.py fetch g15 5 g15                      # -> data/g15_*.bin
 python3 tools/kaggle_train.py push n12 --gen g15:5 -- '/kaggle/input/**/k_*.bin' --hidden 384 --buckets 4 --epochs 30 --lam 0.6 --dedup --cosine

@@ -3,7 +3,7 @@
 
   kaggle_train.py push NAME [--gen TAG:N ...] -- <train.py args, data given as /kaggle/input globs>
   kaggle_train.py status NAME
-  kaggle_train.py fetch NAME          -> nets/NAME.bin (+ log printed)
+  kaggle_train.py fetch NAME          -> tools/nets/NAME.bin (+ log printed)
 Data sources mounted: dataset bt-data-g4-g7 and the outputs of generation kernels bt-TAG-1..N.
 """
 import glob, json, os, re, shutil, subprocess, sys
@@ -57,8 +57,8 @@ def fetch(name):
         except Exception:
             print(open(f).read()[-3000:])
     for f in glob.glob(os.path.join(d, f"{name}.bin*")):
-        shutil.copy(f, os.path.join(ROOT, "nets"))
-        print("saved nets/" + os.path.basename(f))
+        shutil.copy(f, os.path.join(ROOT, "tools", "nets"))
+        print("saved tools/nets/" + os.path.basename(f))
 
 
 if __name__ == "__main__":

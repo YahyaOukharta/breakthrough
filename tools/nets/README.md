@@ -31,5 +31,5 @@ Trained weights in the format `tools/train.py` exports and `tools/pack.py` embed
 | `n11a.bin` | 512 | 4 | 512 candidate (+33 ± 34 vs v3.0 at 100 ms; too large to embed untied) |
 
 ```sh
-python3 tools/pack.py -n nets/n10b.bin -H 384 -B 4 -o out/submission.cpp
+python3 tools/pack.py -n tools/nets/n10b.bin -H 384 -B 4 -o out/submission.cpp
 ```

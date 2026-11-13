@@ -1,7 +1,7 @@
 # Local builds. The submission itself is produced by tools/pack.py (see README).
 CXX      ?= c++
 CXXFLAGS ?= -O3 -std=c++17 -march=native
-NET      ?= nets/n10b.bin
+NET      ?= tools/nets/n10b.bin
 HIDDEN   ?= 384
 BUCKETS  ?= 4
 

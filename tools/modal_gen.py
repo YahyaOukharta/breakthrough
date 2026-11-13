@@ -1,6 +1,6 @@
 """Self-play data generation on Modal.
 
-  modal run tools/modal_gen.py --workers 1 --cpu 4 --games 300 --seed 50000 --net nets/n6w.bin --hid 384 --tag test
+  modal run tools/modal_gen.py --workers 1 --cpu 4 --games 300 --seed 50000 --net tools/nets/n6w.bin --hid 384 --tag test
 Each worker is one container with `cpu` cores; it compiles the engine and runs one
 generator process per available hardware thread. Output goes to the Modal volume
 "bt-data" under /<tag>/; download with:  modal volume get bt-data /<tag> data_modal/
@@ -9,7 +9,7 @@ import os
 import modal
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NET = os.environ.get("BT_MODAL_NET", "nets/n6w.bin")
+NET = os.environ.get("BT_MODAL_NET", "tools/nets/n6w.bin")
 app = modal.App("bt-gen")
 image = (modal.Image.debian_slim().apt_install("g++")
          .add_local_file(os.path.join(ROOT, "bot.cpp"), "/src/bot.cpp")

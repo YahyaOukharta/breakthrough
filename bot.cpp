@@ -1,7 +1,7 @@
 // Breakthrough bot for CodinGame: bitboard alpha-beta search with an NNUE-style evaluation.
 // Single file; tools/pack.py turns it into the submission (embeds the net, strips LOCAL code).
 // Local-only knobs come from environment variables (unset on CodinGame):
-//   BT_NET=nets/x.bin           load a net (LOCAL builds; compile with -DNN_H / -DNN_B to match)
+//   BT_NET=tools/nets/x.bin           load a net (LOCAL builds; compile with -DNN_H / -DNN_B to match)
 //   BT_GEN=games:nodes:seed:out self-play data generation (LOCAL builds)
 //   BT_OPENING="a2a3 h7h6 ..."  pre-played moves (local referee forces opening diversity)
 //   BT_MS / BT_FIRST_MS         time limits per turn in ms (default 100 / 1000)

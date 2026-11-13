@@ -12,7 +12,7 @@ The whole data set lives on the GPU as raw bytes (16 per position); bitboards ar
 unpacked to the 128 inputs there with a 256x8 lookup table, so the CPU does nothing per
 batch.
 
-  train.py -o nets/n0.bin data/g0_*.bin [--hidden 256] [--epochs 12] [--lam 0.6]
+  train.py -o tools/nets/n0.bin data/g0_*.bin [--hidden 256] [--epochs 12] [--lam 0.6]
 """
 import argparse, glob, time
 import numpy as np

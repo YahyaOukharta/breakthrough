@@ -8,7 +8,7 @@ self-play, all in one C++ file under the 100k-character limit.
 ([`versions/v3.0.cpp`](versions/v3.0.cpp) is the submitted source, without its weights).
 
 > The sources in `versions/` do not embed their network weights. The trained nets are
-> kept separately in [`nets/`](nets).
+> kept separately in [`tools/nets/`](tools/nets).
 
 | Stage | Arena score | Rank |
 |---|---|---|
@@ -31,7 +31,7 @@ captures diagonally only. First pawn on the far row wins. 1000 ms for the first 
 ## How it works
 
 ```
- self-play (bot.cpp, BT_GEN)  ──►  data/*.bin  ──►  tools/train.py  ──►  nets/*.bin
+ self-play (bot.cpp, BT_GEN)  ──►  data/*.bin  ──►  tools/train.py  ──►  tools/nets/*.bin
           ▲                                                                  │
           └──────────── stronger net plays the next generation ◄─────────────┤
                                                                              ▼
@@ -66,7 +66,7 @@ c++ -O3 -std=c++17 -march=native -o build/v1.1 versions/v1.1.cpp
 ```
 
 One full improvement cycle (generation 0 uses the handcrafted eval; later ones add
-`BT_NET=nets/current.bin`):
+`BT_NET=tools/nets/current.bin`):
 
 ```sh
 # 1. self-play data: 2000 games, 3000 nodes per move, seed 1
@@ -74,11 +74,11 @@ mkdir -p data nets
 BT_GEN=2000:3000:1:data/g0_1.bin ./build/bot
 
 # 2. train (the recipe of the v3.0 net)
-python3 tools/train.py -o nets/new.bin 'data/g*_*.bin' --hidden 384 --buckets 4 \
+python3 tools/train.py -o tools/nets/new.bin 'data/g*_*.bin' --hidden 384 --buckets 4 \
         --epochs 30 --lam 0.6 --dedup --cosine --no-side
 
 # 3. pack into a single-file submission, 4. gate against the previous best
-python3 tools/pack.py -n nets/new.bin -H 384 -B 4 -o out/new.cpp
+python3 tools/pack.py -n tools/nets/new.bin -H 384 -B 4 -o out/new.cpp
 python3 tools/league.py add cand out/new.cpp
 python3 tools/league.py match cand build/v1.1 -g 400 -n 100000
 ```
@@ -88,7 +88,7 @@ python3 tools/league.py match cand build/v1.1 -g 400 -n 100000
 | Path | What |
 |---|---|
 | `bot.cpp` | The whole engine: search, evaluation, data generator (`#ifdef LOCAL`) |
-| `nets/` | Trained nets (`.bin`), with a table of sizes and versions |
+| `tools/nets/` | Trained nets (`.bin`), with a table of sizes and versions |
 | `versions/` | Every submitted version as a single file. v1.x are complete; v2.0+ have the weight literal cut (they show the code, they do not compile) |
 | `tools/referee.cpp` | Fast native referee, mirrors the official Java one |
 | `tools/league.py` | Freeze versions, play matches, Elo |

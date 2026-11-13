@@ -4,7 +4,7 @@ Negamax alpha-beta in `search()` / `qsearch()` / `think()` in [`bot.cpp`](../bot
 Each feature sits behind a `#define`, so a variant is one `-D` flag away:
 
 ```sh
-python3 tools/pack.py -n nets/current.bin -H 384 -B 4 -D SE=0 -o out/no_se.cpp   # same bot without singular extensions
+python3 tools/pack.py -n tools/nets/current.bin -H 384 -B 4 -D SE=0 -o out/no_se.cpp   # same bot without singular extensions
 ```
 
 Elo numbers are self-play gate matches (300–600 games, ±35–40) against the version

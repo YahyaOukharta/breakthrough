@@ -24,7 +24,7 @@ the [Stockfish NNUE guide](https://github.com/official-stockfish/nnue-pytorch/bl
 - **Output:** win-probability logit of the side to move; `× NN_SCALE (200)` gives search
   units, so 200 ≈ one logit.
 
-v3.0 net: 384 hidden, 4 buckets, 52k weights (`nets/n10b.bin`).
+v3.0 net: 384 hidden, 4 buckets, 52k weights (`tools/nets/n10b.bin`).
 
 ## Quantization and inference
 
@@ -56,7 +56,7 @@ table or static rules never pay for it.
 Built into the engine (`runGen`, `genPlay`; `#ifdef LOCAL`):
 
 ```sh
-BT_NET=nets/current.bin BT_GEN=2000:3000:1:data/g15_1.bin ./build/bot    # games:nodes:seed:file
+BT_NET=tools/nets/current.bin BT_GEN=2000:3000:1:data/g15_1.bin ./build/bot    # games:nodes:seed:file
 ```
 
 - 4–12 random opening plies, then both sides search with a **fixed node budget**
@@ -75,7 +75,7 @@ bytes per position; inputs are unpacked there, so an epoch over 100M positions t
 about a minute on a cloud GPU.
 
 ```sh
-python3 tools/train.py -o nets/new.bin 'data/g*_*.bin' --hidden 384 --buckets 4 \
+python3 tools/train.py -o tools/nets/new.bin 'data/g*_*.bin' --hidden 384 --buckets 4 \
         --epochs 30 --lam 0.6 --dedup --cosine --no-side
 ```
 
