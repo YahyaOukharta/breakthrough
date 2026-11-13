@@ -1,7 +1,7 @@
 # Nets
 
 Trained weights in the format `tools/train.py` exports and `tools/pack.py` embeds
-(int16, see [docs/nnue.md](../docs/nnue.md)). In training order.
+(int16, see [docs/nnue.md](../../docs/nnue.md)). In training order.
 
 | File | Hidden (`-H`) | Buckets (`-B`) | Used in |
 |---|---|---|---|
