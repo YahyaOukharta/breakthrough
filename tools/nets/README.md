@@ -29,6 +29,8 @@ Trained weights in the format `tools/train.py` exports and `tools/pack.py` embed
 | `n10b.bin` | 384 | 4 | **v3.0** |
 | `n11k.bin` | 384 | 8 | 8-bucket test (−17) |
 | `n11a.bin` | 512 | 4 | 512 candidate (+33 ± 34 vs v3.0 at 100 ms; too large to embed untied) |
+| `n11d.bin` | 512, mirror-tied (`-S`) | 4 | candidate: +42 ± 24 vs v3.0 at 100 ms (800 games) |
+| `n11e.bin` | 640, mirror-tied (`-S`) | 4 | candidate: +72 ± 35 vs v3.0 at 100 ms (400 games) |
 
 ```sh
 python3 tools/pack.py -n tools/nets/n10b.bin -H 384 -B 4 -o out/submission.cpp

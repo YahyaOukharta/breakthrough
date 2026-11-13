@@ -21,6 +21,13 @@ self-play, all in one C++ file under the 100k-character limit.
 
 Full version table: [docs/history.md](docs/history.md).
 
+<details>
+<summary>Leaderboard, 2026-11-13</summary>
+
+![Top 10 of the Breakthrough arena on 2026-11-13](docs/img/leaderboard-2026-11-13.png)
+
+</details>
+
 ## The game
 
 8x8 board, 16 pawns each. A pawn moves one step forward (straight or diagonal) and
