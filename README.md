@@ -70,7 +70,7 @@ One full improvement cycle (generation 0 uses the handcrafted eval; later ones a
 
 ```sh
 # 1. self-play data: 2000 games, 3000 nodes per move, seed 1
-mkdir -p data nets
+mkdir -p data
 BT_GEN=2000:3000:1:data/g0_1.bin ./build/bot
 
 # 2. train (the recipe of the v3.0 net)
