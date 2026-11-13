@@ -1,0 +1,18 @@
+# everything hidden except this file
+.*
+!.gitignore
+
+# build products and packed submissions (regenerate with make / tools/pack.py)
+build/
+out/
+league/
+__pycache__/
+
+# training data, cloud job folders, arena dumps, local progress page
+data/
+kaggle/
+arena/
+tracker/
+
+# trained weights are not published
+nets/

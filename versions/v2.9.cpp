@@ -1,0 +1,833 @@
+// Breakthrough bot for CodinGame — alpha-beta engine (v1 line).
+// Single file. Local-only knobs come from environment variables (unset on CodinGame):
+//   BT_OPENING="a2a3 h7h6 ..."  pre-played moves (local referee forces opening diversity)
+//   BT_MS / BT_FIRST_MS         time limits per turn in ms (default 100 / 1000)
+//   BT_NODES                    fixed node budget per move (deterministic testing)
+//   BT_PARAMS="v0,v1,..."       override evaluation parameters
+//   BT_PERFT=N                  print perft(N) from the start position and exit
+#ifdef __x86_64__
+#pragma GCC optimize("O3,inline,omit-frame-pointer,unroll-loops")
+#pragma GCC target("avx2,bmi,bmi2,popcnt,lzcnt")
+#endif
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <vector>
+using namespace std;
+
+typedef uint64_t U64;
+
+// Board: bit = rank*8 + file, a1 = bit 0. Inside the search the side to move always
+// moves "up" (towards rank 8): after each move the board is flipped vertically and the
+// two bitboards are swapped, so there is a single code path and no colour anywhere.
+static const U64 FILE_A = 0x0101010101010101ULL, FILE_H = 0x8080808080808080ULL;
+static const U64 R2 = 0xFFULL << 8, R3 = 0xFFULL << 16, R6 = 0xFFULL << 40,
+                 R7 = 0xFFULL << 48;
+
+static inline U64 flip(U64 x) { return __builtin_bswap64(x); }
+static inline U64 attUp(U64 p) { return ((p << 7) & ~FILE_H) | ((p << 9) & ~FILE_A); }
+static inline U64 attDn(U64 p) { return ((p >> 7) & ~FILE_A) | ((p >> 9) & ~FILE_H); }
+static inline int pop(U64 x) { return __builtin_popcountll(x); }
+static inline int lsb(U64 x) { return __builtin_ctzll(x); }
+
+#ifndef ASP
+#define ASP 30
+#endif
+#ifndef RFP
+#define RFP 60
+#endif
+#ifndef NMP
+#define NMP 0
+#endif
+#ifndef FUT
+#define FUT 60
+#endif
+#ifndef RACE
+#define RACE 0
+#endif
+#ifndef SE
+#define SE 2        // singular extensions: 0 = off, else margin per depth unit
+#endif
+#ifndef SE_DEPTH
+#define SE_DEPTH 6
+#endif
+#ifndef TE
+#define TE 0        // threat extension: extend safe pushes to the rank two steps from goal
+#endif
+#ifndef LMR_DIV
+#define LMR_DIV 1.8
+#endif
+static const int WIN = 30000, MATE_BOUND = 29000, INF = 32000, MAXPLY = 96;
+
+// ---- evaluation parameters -------------------------------------------------------
+// P[0..6]: value of a pawn on rank index 0 (home row) .. 6; P[7]: supported bonus;
+// P[8]: hanging (attacked and unsupported) penalty.
+static int P[16] = {100, 100, 118, 142, 180, 240, 340, 6, 12};
+static const int NPARAMS = 9;
+
+static inline int sideScore(U64 me, U64 them) {  // "me" moves up
+    int s = 0;
+    for (int r = 0; r < 7; r++) s += pop(me & (0xFFULL << (8 * r))) * P[r];
+    U64 myAtt = attUp(me), thAtt = attDn(them);
+    s += P[7] * pop(me & myAtt);
+    s -= P[8] * pop(me & thAtt & ~myAtt);
+    return s;
+}
+
+// ---- neural evaluation (NNUE style) ------------------------------------------------
+// Two perspectives share one feature transformer: 128 inputs (own pawn on square,
+// enemy pawn on square, in that side's own frame) -> NN_H. Output = SCReLU(stm acc) . o0
+// + SCReLU(other acc) . o1 + bias, a win-probability logit scaled to search units.
+// Accumulators live on a per-ply stack and are updated lazily from the parent.
+#define NN_EMBED 1
+#define NN_OFF 27756
+#define NN_H 384
+#define NN_B 4
+static const char16_t NN_DATA[] = u"汚汚沄汉汪氛沰沵汐汹沧氵沿汴汪汐永沀汯毛毤沝汐汒比汻汳沀泛汷汱汭汫汿氾氉汧氷沦歃汎氭沐汔沌汒汃汳...";
+#error "Network weights are not included. Train a net (docs/nnue.md) and build a submission with tools/pack.py."
+#ifndef NN_H
+#define NN_H 256
+#endif
+#ifndef NN_SCALE
+#define NN_SCALE 200
+#endif
+static const int QA = 255, QB = 64;
+static bool useNN = false;
+#ifndef NN_B
+#define NN_B 1   // output buckets, chosen by the number of pawns on the board
+#endif
+static int16_t nnW[128][NN_H], nnB[NN_H], nnO[NN_B][2][NN_H];
+static int32_t nnOB[NN_B];
+struct AccEntry {
+    int16_t a[2][NN_H];  // [0] side to move, [1] the other side
+    bool ok;
+    uint8_t f, t, cap;   // move (in the parent's frame) that led here
+};
+static AccEntry accSt[MAXPLY + 4];
+
+static void accFresh(AccEntry& e, U64 own, U64 opp) {
+    for (int i = 0; i < NN_H; i++) e.a[0][i] = e.a[1][i] = nnB[i];
+    for (U64 b = own; b; b &= b - 1) {
+        int sq = lsb(b);
+        const int16_t *w0 = nnW[sq], *w1 = nnW[64 + (sq ^ 56)];
+        for (int i = 0; i < NN_H; i++) { e.a[0][i] += w0[i]; e.a[1][i] += w1[i]; }
+    }
+    for (U64 b = opp; b; b &= b - 1) {
+        int sq = lsb(b);
+        const int16_t *w0 = nnW[64 + sq], *w1 = nnW[sq ^ 56];
+        for (int i = 0; i < NN_H; i++) { e.a[0][i] += w0[i]; e.a[1][i] += w1[i]; }
+    }
+    e.ok = true;
+}
+static void accEnsure(int ply) {
+    AccEntry& e = accSt[ply];
+    if (e.ok) return;
+    accEnsure(ply - 1);
+    const AccEntry& p = accSt[ply - 1];
+    int f = e.f, t = e.t;
+    // The mover (parent's side to move) becomes the "other side" of the child.
+    const int16_t *mf = nnW[f], *mt = nnW[t], *of = nnW[64 + (f ^ 56)], *ot = nnW[64 + (t ^ 56)];
+#ifdef __x86_64__
+    const int16_t *mc = nnW[64 + t], *oc = nnW[t ^ 56];
+    auto L = [](const int16_t* q) { return _mm256_loadu_si256((const __m256i*)q); };
+    for (int i = 0; i < NN_H; i += 16) {
+        __m256i x = _mm256_add_epi16(_mm256_sub_epi16(L(p.a[0] + i), L(mf + i)), L(mt + i));
+        __m256i y = _mm256_add_epi16(_mm256_sub_epi16(L(p.a[1] + i), L(of + i)), L(ot + i));
+        if (e.cap) { x = _mm256_sub_epi16(x, L(mc + i)); y = _mm256_sub_epi16(y, L(oc + i)); }
+        _mm256_storeu_si256((__m256i*)(e.a[1] + i), x);
+        _mm256_storeu_si256((__m256i*)(e.a[0] + i), y);
+    }
+    e.ok = true;
+    return;
+#endif
+    if (e.cap) {
+        const int16_t *mc = nnW[64 + t], *oc = nnW[t ^ 56];
+        for (int i = 0; i < NN_H; i++) e.a[1][i] = (int16_t)(p.a[0][i] - mf[i] + mt[i] - mc[i]);
+        for (int i = 0; i < NN_H; i++) e.a[0][i] = (int16_t)(p.a[1][i] - of[i] + ot[i] - oc[i]);
+    } else {
+        for (int i = 0; i < NN_H; i++) e.a[1][i] = (int16_t)(p.a[0][i] - mf[i] + mt[i]);
+        for (int i = 0; i < NN_H; i++) e.a[0][i] = (int16_t)(p.a[1][i] - of[i] + ot[i]);
+    }
+    e.ok = true;
+}
+static inline int nnEval(int ply, U64 own, U64 opp) {
+    accEnsure(ply);
+    const AccEntry& e = accSt[ply];
+    const int bk = (pop(own | opp) - 1) * NN_B / 32;
+    int32_t s = 0;
+#ifdef __x86_64__
+    __m256i acc = _mm256_setzero_si256(), zero = _mm256_setzero_si256(), qa = _mm256_set1_epi16(QA);
+    for (int k = 0; k < 2; k++) {
+        const int16_t *a = e.a[k], *o = nnO[bk][k];
+        for (int i = 0; i < NN_H; i += 16) {
+            __m256i v = _mm256_min_epi16(_mm256_max_epi16(_mm256_loadu_si256((const __m256i*)(a + i)), zero), qa);
+            __m256i w = _mm256_mullo_epi16(v, _mm256_loadu_si256((const __m256i*)(o + i)));
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(w, v));
+        }
+    }
+    __m128i h = _mm_add_epi32(_mm256_castsi256_si128(acc), _mm256_extracti128_si256(acc, 1));
+    h = _mm_add_epi32(h, _mm_shuffle_epi32(h, 0x4E));
+    h = _mm_add_epi32(h, _mm_shuffle_epi32(h, 0xB1));
+    s = _mm_cvtsi128_si32(h);
+#else
+    for (int k = 0; k < 2; k++) {
+        const int16_t *a = e.a[k], *o = nnO[bk][k];
+        for (int i = 0; i < NN_H; i++) {
+            int32_t v = a[i] < 0 ? 0 : (a[i] > QA ? QA : a[i]);
+            s += (v * o[i]) * v;
+        }
+    }
+#endif
+    int64_t z = (int64_t)(s / QA + nnOB[bk]) * NN_SCALE / (QA * QB);
+    return (int)(z > 20000 ? 20000 : (z < -20000 ? -20000 : z));
+}
+// Embedded weights (inserted by tools/pack.py): one UTF-16 unit per int16, value + NN_OFF.
+
+#ifdef NN_EMBED
+static void loadEmbedded() {
+    const char16_t* p = NN_DATA;
+    auto rd = [&]() { return (int)*p++ - NN_OFF; };
+    for (int i = 0; i < 128; i++) for (int j = 0; j < NN_H; j++) nnW[i][j] = (int16_t)rd();
+    for (int j = 0; j < NN_H; j++) nnB[j] = (int16_t)rd();
+    for (int b = 0; b < NN_B; b++) for (int k = 0; k < 2; k++) for (int j = 0; j < NN_H; j++) nnO[b][k][j] = (int16_t)rd();
+    for (int b = 0; b < NN_B; b++) { int hi = rd(), lo = rd(); nnOB[b] = hi * 16384 + lo; }
+    useNN = true;
+}
+#endif
+static inline int evaluate(U64 own, U64 opp, int ply) {
+    if (useNN) return nnEval(ply, own, opp);
+    return sideScore(own, opp) - sideScore(flip(opp), flip(own));
+}
+
+// ---- move generation ---------------------------------------------------------------
+// Move = from | to << 6.
+static inline int genMoves(U64 own, U64 opp, uint16_t* mv) {
+    int n = 0;
+    U64 s = (own << 8) & ~(own | opp);
+    while (s) { int t = lsb(s); s &= s - 1; mv[n++] = (uint16_t)((t - 8) | (t << 6)); }
+    U64 l = (own << 7) & ~FILE_H & ~own;
+    while (l) { int t = lsb(l); l &= l - 1; mv[n++] = (uint16_t)((t - 7) | (t << 6)); }
+    U64 r = (own << 9) & ~FILE_A & ~own;
+    while (r) { int t = lsb(r); r &= r - 1; mv[n++] = (uint16_t)((t - 9) | (t << 6)); }
+    return n;
+}
+static inline int genCaptures(U64 own, U64 opp, uint16_t* mv) {
+    int n = 0;
+    U64 l = (own << 7) & ~FILE_H & opp;
+    while (l) { int t = lsb(l); l &= l - 1; mv[n++] = (uint16_t)((t - 7) | (t << 6)); }
+    U64 r = (own << 9) & ~FILE_A & opp;
+    while (r) { int t = lsb(r); r &= r - 1; mv[n++] = (uint16_t)((t - 9) | (t << 6)); }
+    return n;
+}
+
+// Side to move has a move onto rank 7 that cannot be captured (wins in 2 own moves,
+// provided the opponent has no pawn one step from our home row).
+static inline bool safe7(U64 own, U64 opp) {
+    U64 p = own & R6;
+    if (!p) return false;
+    U64 t = ((p << 8) & ~(own | opp)) | (attUp(p) & ~own);
+    return (t & ~attDn(opp)) != 0;
+}
+// Opponent threatens the same thing against us (it is our move).
+static inline bool oppThreat(U64 own, U64 opp) {
+    U64 p = opp & R3;
+    if (!p) return false;
+    U64 t = ((p >> 8) & ~(own | opp)) | (attDn(p) & ~opp);
+    return (t & ~attUp(own)) != 0;
+}
+
+// Race rule. A pawn whose forward cone holds no enemy pawn can never be attacked or
+// blocked, so it needs exactly (rows to go) moves. Returns +d when the side to move wins
+// in d own moves (its runner is at least as fast as ANY enemy pawn could possibly be),
+// -d when the opponent wins in d moves (its runner is strictly faster than any of our
+// pawns could possibly be), 0 when unknown.
+static U64 coneUp[64], coneDn[64];
+static void initCones() {
+    for (int s = 0; s < 64; s++) {
+        int r = s >> 3, f = s & 7;
+        for (int q = 0; q < 64; q++) {
+            int r2 = q >> 3, f2 = q & 7;
+            if (r2 > r && abs(f2 - f) <= r2 - r) coneUp[s] |= 1ULL << q;
+            if (r2 < r && abs(f2 - f) <= r - r2) coneDn[s] |= 1ULL << q;
+        }
+    }
+}
+static inline int race(U64 own, U64 opp) {
+    int oMin = lsb(opp) >> 3;
+    int mMin = 7 - ((63 - __builtin_clzll(own)) >> 3);
+    if (mMin <= oMin) {
+        U64 c = own & (~0ULL << (8 * (7 - oMin)));
+        while (c) {
+            int s = 63 - __builtin_clzll(c);
+            c ^= 1ULL << s;
+            if (!(coneUp[s] & opp)) return 7 - (s >> 3);
+        }
+    } else {
+        U64 c = opp & ((1ULL << (8 * mMin)) - 1);
+        while (c) {
+            int s = lsb(c);
+            c &= c - 1;
+            if (!(coneDn[s] & own)) return -(s >> 3);
+        }
+    }
+    return 0;
+}
+
+// ---- transposition table -------------------------------------------------------------
+struct TTEntry { U64 key; int16_t score; uint16_t move; uint8_t depth, flag; uint16_t pad; };
+static const int TT_BITS = 21;
+static TTEntry* tt;
+enum { TT_NONE = 0, TT_EXACT = 1, TT_LOWER = 2, TT_UPPER = 3 };
+
+static inline U64 hashPos(U64 a, U64 b) {
+    U64 h = a * 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 32;
+    h += b * 0xC2B2AE3D27D4EB4FULL;
+    h ^= h >> 29;
+    h *= 0xBF58476D1CE4E5B9ULL;
+    h ^= h >> 32;
+    return h;
+}
+
+// ---- search state ----------------------------------------------------------------------
+static U64 nodes, nodeLimit;
+static bool stopSearch;
+static chrono::steady_clock::time_point deadline;
+static uint16_t killers[MAXPLY][2];
+static int hist[2][64][64];
+static uint16_t rootMove;
+static int lmr[64][64];
+
+static inline void checkTime() {
+    if (nodeLimit) { if (nodes >= nodeLimit) stopSearch = true; return; }
+    if ((nodes & 1023) == 0 && chrono::steady_clock::now() >= deadline) stopSearch = true;
+}
+
+static int qsearch(U64 own, U64 opp, int alpha, int beta, int ply, int qd) {
+    if (!own) return -(WIN - ply);
+    if (own & R7) return WIN - ply - 1;
+    U64 T = opp & R2;
+    if (T) {
+        if ((T & (T - 1)) || !(attUp(own) & T)) return -(WIN - ply - 2);
+    } else if (safe7(own, opp)) return WIN - ply - 3;
+    if (RACE && opp) {
+        int rc = race(own, opp);
+        if (rc > 0) return WIN - ply - (2 * rc - 1);
+        if (rc < 0) return -(WIN - ply + 2 * rc);
+    }
+    ++nodes;
+    checkTime();
+    if (stopSearch) return 0;
+    if (ply >= MAXPLY - 2) return evaluate(own, opp, ply);
+
+    bool evasion = !T && qd < 2 && oppThreat(own, opp);
+    int best = -INF;
+    if (!T && !evasion) {
+        best = evaluate(own, opp, ply);
+        if (best >= beta) return best;
+        if (best > alpha) alpha = best;
+    }
+    uint16_t mv[64];
+    int sc[64];
+    int n = evasion ? genMoves(own, opp, mv) : genCaptures(own, opp, mv);
+    U64 oa = attDn(opp);
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        int t = mv[i] >> 6;
+        U64 tb = 1ULL << t;
+        if (T && !(tb & T)) continue;
+        int s = (opp & tb) ? 1000 + (7 - (t >> 3)) * 10 + ((oa & tb) ? 0 : 50) : (t >> 3);
+        mv[k] = mv[i];
+        sc[k++] = s;
+    }
+    n = k;
+    for (int i = 0; i < n; i++) {
+        int bi = i;
+        for (int j = i + 1; j < n; j++) if (sc[j] > sc[bi]) bi = j;
+        swap(mv[i], mv[bi]);
+        swap(sc[i], sc[bi]);
+        int f = mv[i] & 63, t = mv[i] >> 6;
+        U64 no = (own ^ (1ULL << f)) | (1ULL << t), np = opp & ~(1ULL << t);
+        { AccEntry& ce = accSt[ply + 1]; ce.ok = false; ce.f = (uint8_t)f; ce.t = (uint8_t)t; ce.cap = (opp >> t) & 1; }
+        int v = -qsearch(flip(np), flip(no), -beta, -alpha, ply + 1, qd + (evasion ? 1 : 0));
+        if (stopSearch) return 0;
+        if (v > best) {
+            best = v;
+            if (v > alpha) {
+                alpha = v;
+                if (v >= beta) break;
+            }
+        }
+    }
+    if (best == -INF) return -(WIN - ply - 2);  // only reachable with no legal reply
+    return best;
+}
+
+static int search(U64 own, U64 opp, int depth, int alpha, int beta, int ply, bool allowNull = true, uint16_t excl = 0) {
+    if (!own) return -(WIN - ply);
+    if (own & R7) return WIN - ply - 1;
+    U64 T = opp & R2;
+    bool forced = false;
+    if (T) {
+        if (ply > 0 && ((T & (T - 1)) || !(attUp(own) & T))) return -(WIN - ply - 2);
+        forced = !(T & (T - 1)) && (attUp(own) & T);
+    } else if (ply > 0 && safe7(own, opp)) return WIN - ply - 3;
+    if (RACE && ply > 0 && opp) {
+        int rc = race(own, opp);
+        if (rc > 0) return WIN - ply - (2 * rc - 1);
+        if (rc < 0) return -(WIN - ply + 2 * rc);
+    }
+
+    if (depth <= 0 && !forced) return qsearch(own, opp, alpha, beta, ply, 0);
+    if (depth < 0) depth = 0;
+    ++nodes;
+    checkTime();
+    if (stopSearch) return 0;
+    if (ply >= MAXPLY - 2) return evaluate(own, opp, ply);
+
+    bool pv = beta - alpha > 1;
+    U64 key = hashPos(own, opp);
+    TTEntry* e = &tt[key & ((1ULL << TT_BITS) - 1)];
+    uint16_t ttMove = 0;
+    int ttScore = 0, ttDepth = -1, ttFlag = TT_NONE;
+    if (e->key == key && e->flag != TT_NONE) {
+        ttMove = e->move;
+        ttScore = e->score; ttDepth = e->depth; ttFlag = e->flag;
+        if (ply > 0 && e->depth >= depth && !pv && !excl) {
+            int s = e->score;
+            if (s > MATE_BOUND) s -= ply; else if (s < -MATE_BOUND) s += ply;
+            if (e->flag == TT_EXACT) return s;
+            if (e->flag == TT_LOWER && s >= beta) return s;
+            if (e->flag == TT_UPPER && s <= alpha) return s;
+        }
+    }
+    if (ply == 0 && rootMove) ttMove = rootMove;
+
+    int se = 0;
+    bool canPrune = !pv && !forced && ply > 0 && (RFP || NMP || FUT) && !oppThreat(own, opp);
+    if (canPrune) {
+        se = evaluate(own, opp, ply);
+        if (RFP && depth <= 3 && se - RFP * depth >= beta) return se;
+        if (NMP && !useNN && allowNull && depth >= 3 && se >= beta && pop(own) > 3) {
+            int R = 2 + depth / 4;
+            int v = -search(flip(opp), flip(own), depth - 1 - R, -beta, -beta + 1, ply + 1, false);
+            if (stopSearch) return 0;
+            if (v >= beta && v < MATE_BOUND) return v;
+        }
+    }
+
+    // Singular extension: if every other move fails well below the TT move's score, the TT
+    // move is the only good one here and is searched one ply deeper. If instead even the
+    // reduced search without it beats beta, the node is cut (multi-cut).
+    int singularExt = 0;
+    if (SE && !excl && ply > 0 && depth >= SE_DEPTH && ttMove && !forced && ttDepth >= depth - 3 &&
+        (ttFlag == TT_LOWER || ttFlag == TT_EXACT) && ttScore < MATE_BOUND && ttScore > -MATE_BOUND) {
+        int sb = ttScore - SE * depth;
+        int v = search(own, opp, (depth - 1) / 2, sb - 1, sb, ply, false, ttMove);
+        if (stopSearch) return 0;
+        if (v < sb) singularExt = 1;
+        else if (sb >= beta) return sb;
+    }
+
+    uint16_t mv[64];
+    int sc[64];
+    int n = genMoves(own, opp, mv);
+    U64 oa = attDn(opp);
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        uint16_t m = mv[i];
+        if (m == excl) continue;
+        int f = m & 63, t = m >> 6;
+        U64 tb = 1ULL << t;
+        if (forced && !(tb & T)) continue;
+        int s;
+        bool supported = (attUp(own & ~(1ULL << f)) & tb) != 0;
+        if (m == ttMove) s = 1 << 30;
+        else if (opp & tb) {
+            s = 2000000 + (7 - (t >> 3)) * 10000;
+            if (!(oa & tb)) s += 50000; else if (supported) s += 20000;
+        } else {
+            s = hist[ply & 1][f][t];
+            if (m == killers[ply][0]) s += 900000;
+            else if (m == killers[ply][1]) s += 800000;
+            if ((oa & tb) && !supported) s -= 1000000;
+        }
+        mv[k] = m;
+        sc[k++] = s;
+    }
+    n = k;
+
+    int best = -INF, origAlpha = alpha;
+    uint16_t bestMove = 0;
+    int ext = forced ? 1 : 0;
+    for (int i = 0; i < n; i++) {
+        int bi = i;
+        for (int j = i + 1; j < n; j++) if (sc[j] > sc[bi]) bi = j;
+        swap(mv[i], mv[bi]);
+        swap(sc[i], sc[bi]);
+        uint16_t m = mv[i];
+        int f = m & 63, t = m >> 6;
+        bool capture = (opp >> t) & 1;
+        U64 no = (own ^ (1ULL << f)) | (1ULL << t), np = opp & ~(1ULL << t);
+        U64 co = flip(np), cp = flip(no);
+        { AccEntry& ce = accSt[ply + 1]; ce.ok = false; ce.f = (uint8_t)f; ce.t = (uint8_t)t; ce.cap = capture; }
+        int nd = depth - 1 + ext, v;
+        if (m == ttMove) nd += singularExt;
+        else if (TE && !ext && (t >> 3) == 5 && !(oa & (1ULL << t)) && depth <= TE) nd++;
+        if (FUT && canPrune && depth <= 2 && i > 0 && !capture && (t >> 3) < 5 && se + FUT * depth <= alpha) {
+            if (best < se) best = se;
+            continue;
+        }
+        if (i == 0) {
+            v = -search(co, cp, nd, -beta, -alpha, ply + 1);
+        } else {
+            int r = 0;
+            if (depth >= 3 && i >= 2 && !capture && !forced && sc[i] < 800000) {
+                r = lmr[min(depth, 63)][min(i, 63)];
+                if (sc[i] < 0) r++;
+                if ((t >> 3) >= 5 && sc[i] >= 0) r = 0;
+                if (pv && r > 0) r--;
+                if (r > nd - 1) r = max(0, nd - 1);
+            }
+            v = -search(co, cp, nd - r, -alpha - 1, -alpha, ply + 1);
+            if (v > alpha && r > 0 && !stopSearch) v = -search(co, cp, nd, -alpha - 1, -alpha, ply + 1);
+            if (v > alpha && v < beta && !stopSearch) v = -search(co, cp, nd, -beta, -alpha, ply + 1);
+        }
+        if (stopSearch) return 0;
+        if (v > best) {
+            best = v;
+            bestMove = m;
+            if (v > alpha) {
+                alpha = v;
+                if (ply == 0) rootMove = m;
+                if (v >= beta) {
+                    if (!capture) {
+                        if (killers[ply][0] != m) { killers[ply][1] = killers[ply][0]; killers[ply][0] = m; }
+                        int& h = hist[ply & 1][f][t];
+                        h += depth * depth;
+                        if (h > 500000) h = 500000;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    if (n == 0) return excl ? alpha : -(WIN - ply - 2);
+    if (excl) return best;
+
+    int flag = best >= beta ? TT_LOWER : (best > origAlpha ? TT_EXACT : TT_UPPER);
+    if (e->key != key || depth >= e->depth || flag == TT_EXACT) {
+        int s = best;
+        if (s > MATE_BOUND) s += ply; else if (s < -MATE_BOUND) s -= ply;
+        e->key = key;
+        e->score = (int16_t)s;
+        e->move = bestMove;
+        e->depth = (uint8_t)depth;
+        e->flag = (uint8_t)flag;
+    }
+    return best;
+}
+
+// ---- perft ------------------------------------------------------------------------------
+static U64 perft(U64 own, U64 opp, int d) {
+    uint16_t mv[64];
+    int n = genMoves(own, opp, mv);
+    if (d == 1) return n;
+    U64 c = 0;
+    for (int i = 0; i < n; i++) {
+        int f = mv[i] & 63, t = mv[i] >> 6;
+        U64 no = (own ^ (1ULL << f)) | (1ULL << t), np = opp & ~(1ULL << t);
+        c += perft(flip(np), flip(no), d - 1);
+    }
+    return c;
+}
+
+// ---- game state / protocol ------------------------------------------------------------------
+static U64 W = 0xFFFFULL, B = 0xFFFFULL << 48;
+static bool whiteToMove = true;
+
+static void applyMove(const string& s) {
+    int f = (s[0] - 'a') + 8 * (s[1] - '1'), t = (s[2] - 'a') + 8 * (s[3] - '1');
+    U64 fb = 1ULL << f, tb = 1ULL << t;
+    if (whiteToMove) { W = (W ^ fb) | tb; B &= ~tb; }
+    else { B = (B ^ fb) | tb; W &= ~tb; }
+    whiteToMove = !whiteToMove;
+}
+static string moveName(uint16_t m) {
+    int f = m & 63, t = m >> 6;
+    if (!whiteToMove) { f ^= 56; t ^= 56; }
+    string s;
+    s += char('a' + (f & 7)); s += char('1' + (f >> 3));
+    s += char('a' + (t & 7)); s += char('1' + (t >> 3));
+    return s;
+}
+
+// Iterative deepening from a root position (side to move = "own", moving up).
+// Stops on the global deadline / node limit. Returns the best move found.
+static uint16_t think(U64 own, U64 opp, int& bestScore, int& bestDepth) {
+    uint16_t best = 0;
+    bestScore = 0;
+    bestDepth = 0;
+    nodes = 0;
+    stopSearch = false;
+    memset(killers, 0, sizeof(killers));
+    for (int a = 0; a < 2; a++)
+        for (int f = 0; f < 64; f++)
+            for (int t = 0; t < 64; t++) hist[a][f][t] /= 4;
+    if (useNN) accFresh(accSt[0], own, opp);
+
+    // Immediate win: a pawn on rank 7 always has a move to rank 8.
+    if (own & R7) {
+        uint16_t mv[64];
+        int k = genMoves(own, opp, mv);
+        for (int i = 0; i < k; i++) if ((mv[i] >> 6) >= 56) { best = mv[i]; break; }
+        bestScore = WIN - 1;
+        return best;
+    }
+    rootMove = 0;
+    for (int d = 1; d < 64; d++) {
+        int v;
+        if (ASP && d >= 4) {
+            int w = ASP, a = bestScore - w, b = bestScore + w;
+            for (;;) {
+                v = search(own, opp, d, a, b, 0);
+                if (stopSearch) break;
+                if (v <= a) { a = max(-INF, a - w); w *= 3; }
+                else if (v >= b) { b = min(INF, b + w); w *= 3; }
+                else break;
+                if (w > 2000) { a = -INF; b = INF; }
+            }
+        } else v = search(own, opp, d, -INF, INF, 0);
+        if (rootMove) best = rootMove;
+        if (stopSearch) break;
+        bestScore = v;
+        bestDepth = d;
+        if (v > MATE_BOUND || v < -MATE_BOUND) break;
+    }
+    return best;
+}
+
+// ---- best-first minimax with UCT ("jacekmax") ------------------------------------------
+// MCTS-shaped tree, but: a leaf is expanded by evaluating ALL its children, values are
+// backed up by overwriting (node = max over children of -child), and selection adds a
+// UCT exploration term to the child's value. Values are win probabilities mapped to
+// [-1,1]; proven results are +-(100 - 0.01 * plies), so shorter wins rank higher.
+#ifndef BFS
+#define BFS 0      // 1 = use best-first search instead of alpha-beta (needs the NN)
+#endif
+#ifndef BF_C
+#define BF_C 0.5f  // exploration constant
+#endif
+#ifndef BF_FPU
+#define BF_FPU 0.3f  // first-play urgency for unvisited children
+#endif
+#ifndef BF_REUSE
+#define BF_REUSE 0  // 1 = keep the subtree of the position actually reached between turns
+#endif
+#ifndef BF_Q
+#define BF_Q 0     // 1 = evaluate new children with quiescence search instead of the raw net
+#endif
+struct BNode { U64 own, opp; float val; uint32_t visits, child; uint16_t move; uint8_t nch, term; };
+static BNode* bpool;
+static uint32_t bused, broot;
+static bool bvalid;
+static const uint32_t BPOOL = 3u << 20;
+
+static inline float bfVal(int s, int depth) {
+    if (s > MATE_BOUND) return 100.f - 0.01f * (float)(depth + (WIN - s));
+    if (s < -MATE_BOUND) return -(100.f - 0.01f * (float)(depth + (WIN + s)));
+    return tanhf((float)s / (2.0f * NN_SCALE));
+}
+static bool bfExpand(BNode* n, int depth) {
+    uint16_t mv[64];
+    int k = genMoves(n->own, n->opp, mv);
+    if (bused + (uint32_t)k > BPOOL) return false;
+    accFresh(accSt[0], n->own, n->opp);
+    uint32_t first = bused;
+    for (int i = 0; i < k; i++) {
+        int f = mv[i] & 63, t = mv[i] >> 6;
+        U64 no = (n->own ^ (1ULL << f)) | (1ULL << t), np = n->opp & ~(1ULL << t);
+        BNode& c = bpool[bused++];
+        c.own = flip(np); c.opp = flip(no);
+        c.move = mv[i]; c.visits = 0; c.child = 0; c.nch = 0;
+        AccEntry& ce = accSt[1];
+        ce.ok = false; ce.f = (uint8_t)f; ce.t = (uint8_t)t; ce.cap = (n->opp >> t) & 1;
+        int sc;
+        // Positions with an enemy pawn one step from our home row are never shown to the
+        // net (the forced reply is searched instead), so those always go through qsearch.
+        if (BF_Q || (c.opp & R2) || !c.own || (c.own & R7) || safe7(c.own, c.opp))
+            sc = qsearch(c.own, c.opp, -INF, INF, 1, 0);
+        else { sc = nnEval(1, c.own, c.opp); ++nodes; }
+        c.val = bfVal(sc, depth);
+        c.term = (sc > MATE_BOUND || sc < -MATE_BOUND);
+    }
+    if (stopSearch) { bused = first; return false; }
+    n->child = first;
+    n->nch = (uint8_t)k;
+    return true;
+}
+static uint16_t thinkBF(U64 own, U64 opp, int& bestScore, int& bestDepth) {
+    nodes = 0;
+    stopSearch = false;
+    bestScore = 0;
+    bestDepth = 0;
+    if (!bpool) bpool = (BNode*)malloc(sizeof(BNode) * BPOOL);
+    // Tree reuse: the new root is a grandchild of the old one (our move, then the reply).
+    uint32_t keep = 0;
+    if (BF_REUSE && bvalid && bused < BPOOL / 2) {
+        BNode* r = &bpool[broot];
+        for (int i = 0; i < r->nch && !keep; i++) {
+            BNode* c = &bpool[r->child + i];
+            for (int j = 0; j < c->nch; j++) {
+                BNode* g = &bpool[c->child + j];
+                if (g->own == own && g->opp == opp) { keep = c->child + j; break; }
+            }
+        }
+    }
+    if (keep) broot = keep;
+    else {
+        bused = 1;
+        broot = 0;
+        BNode* r = &bpool[0];
+        r->own = own; r->opp = opp; r->val = 0; r->visits = 0; r->child = 0; r->nch = 0; r->term = 0;
+    }
+    bvalid = true;
+    BNode* root = &bpool[broot];
+    BNode* path[MAXPLY];
+    int maxd = 0;
+    for (uint32_t it = 0;; it++) {
+        if (nodeLimit) { if (nodes >= nodeLimit) break; }
+        else if ((it & 15) == 0 && chrono::steady_clock::now() >= deadline) break;
+        int d = 0;
+        BNode* n = root;
+        path[0] = n;
+        while (n->nch && !n->term && d < MAXPLY - 4) {
+            float logN = logf((float)n->visits + 1.0f), bs = -1e9f;
+            BNode* bc = 0;
+            BNode* c = &bpool[n->child];
+            for (int i = 0; i < n->nch; i++, c++) {
+                float q = -c->val;
+                q += c->visits ? BF_C * sqrtf(logN / (float)c->visits) : BF_FPU;
+                if (q > bs) { bs = q; bc = c; }
+            }
+            n = bc;
+            path[++d] = n;
+        }
+        if (!n->term && !n->nch && !bfExpand(n, d)) break;
+        if (d > maxd) maxd = d;
+        for (int i = d; i >= 0; i--) {
+            BNode* x = path[i];
+            x->visits++;
+            if (x->nch) {
+                float b = -1e9f;
+                BNode* c = &bpool[x->child];
+                for (int j = 0; j < x->nch; j++, c++) if (-c->val > b) b = -c->val;
+                x->val = b;
+                if (b > 50.f || b < -50.f) x->term = 1;
+            }
+        }
+        if (root->term) break;
+    }
+    uint16_t best = 0;
+    float bs = -1e9f;
+    BNode* c = &bpool[root->child];
+    for (int i = 0; i < root->nch; i++, c++) {
+        float q = -c->val + logf((float)c->visits + 1.0f);
+        if (q > bs) { bs = q; best = c->move; bestScore = (int)(-c->val * 1000.f); }
+    }
+    bestDepth = maxd;
+    if (!best) { uint16_t mv[64]; if (genMoves(own, opp, mv)) best = mv[0]; }
+    return best;
+}
+
+
+int main() {
+    if (const char* p = getenv("BT_PARAMS")) {
+        int i = 0;
+        for (const char* q = p; *q && i < NPARAMS; i++) {
+            P[i] = atoi(q);
+            while (*q && *q != ',') q++;
+            if (*q) q++;
+        }
+    }
+    if (const char* p = getenv("BT_PERFT")) {
+        printf("%llu\n", (unsigned long long)perft(W, B, atoi(p)));
+        return 0;
+    }
+    int turnMs = 100, firstMs = 1000;
+    if (const char* p = getenv("BT_MS")) turnMs = atoi(p);
+    if (const char* p = getenv("BT_FIRST_MS")) firstMs = atoi(p);
+    if (const char* p = getenv("BT_NODES")) nodeLimit = strtoull(p, 0, 10);
+    if (const char* p = getenv("BT_OPENING")) {
+        string s(p);
+        size_t i = 0;
+        while (i < s.size()) {
+            while (i < s.size() && s[i] == ' ') i++;
+            if (i + 4 <= s.size()) applyMove(s.substr(i, 4));
+            i += 4;
+        }
+    }
+    initCones();
+    tt = (TTEntry*)calloc((size_t)1 << TT_BITS, sizeof(TTEntry));
+    for (int d = 1; d < 64; d++)
+        for (int i = 1; i < 64; i++) lmr[d][i] = (int)(0.5 + log((double)d) * log((double)i) / LMR_DIV);
+
+#ifdef NN_EMBED
+    loadEmbedded();
+#endif
+    bool first = true;
+    string line;
+    while (getline(cin, line)) {
+        auto start = chrono::steady_clock::now();
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        int n = 0;
+        string tmp;
+        getline(cin, tmp);
+        n = atoi(tmp.c_str());
+        vector<string> legal(n);
+        for (int i = 0; i < n; i++) {
+            getline(cin, legal[i]);
+            while (!legal[i].empty() && (legal[i].back() == '\r' || legal[i].back() == ' ')) legal[i].pop_back();
+        }
+        if (line != "None" && line.size() >= 4) applyMove(line);
+
+        int budget = first ? firstMs : turnMs;
+        // Search until the hard deadline: an unfinished iteration still yields a usable
+        // move (the previous best is searched first), so there is no early soft stop.
+        int hard = budget >= 100 ? budget - (first ? 30 : 4) : budget * 88 / 100;  // 970 / 96 ms on CodinGame
+        first = false;
+        deadline = start + chrono::milliseconds(hard);
+
+        U64 own = whiteToMove ? W : flip(B), opp = whiteToMove ? B : flip(W);
+        int bestScore = 0, bestDepth = 0;
+        uint16_t best = (BFS && useNN && !(own & R7)) ? thinkBF(own, opp, bestScore, bestDepth)
+                                                     : think(own, opp, bestScore, bestDepth);
+
+        string out = best ? moveName(best) : string();
+        bool ok = false;
+        for (auto& s : legal) if (s == out) { ok = true; break; }
+        char msg[64];
+        double usedMs = chrono::duration<double, milli>(chrono::steady_clock::now() - start).count();
+        static int turnNo = 0;
+        static double maxUsed = 0;
+        if (turnNo > 0 && usedMs > maxUsed) maxUsed = usedMs;
+        fprintf(stderr, "turn %d: used %.1f ms of %d (deadline %d, max so far %.1f) depth %d score %d nodes %llu nps %.0fk\n",
+                turnNo++, usedMs, budget, hard, maxUsed, bestDepth, bestScore, (unsigned long long)nodes,
+                usedMs > 0 ? nodes / usedMs : 0.0);
+        if (ok) snprintf(msg, sizeof msg, "d%d s%d n%lluk t%d", bestDepth, bestScore, (unsigned long long)(nodes / 1000), (int)usedMs);
+        else { out = n ? legal[0] : "a2a3"; snprintf(msg, sizeof msg, "M:fb"); }
+        printf("%s %s\n", out.c_str(), msg);
+        fflush(stdout);
+        applyMove(out);
+    }
+    return 0;
+}
