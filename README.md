@@ -7,9 +7,8 @@ self-play, all in one C++ file under the 100k-character limit.
 **Result:** rank **1 / 381** (score 44.25) on 2026-11-13 as `yhyoxx`, version `v3.0`
 ([`versions/v3.0.cpp`](versions/v3.0.cpp) is the submitted source, without its weights).
 
-> **Trained network weights are not published.** The repository is a reference for how
-> the bot is built; it contains everything needed to train a net from zero, but not a
-> ready-to-submit bot.
+> The sources in `versions/` do not embed their network weights. The trained nets are
+> kept separately in [`nets/`](nets).
 
 | Stage | Arena score | Rank |
 |---|---|---|
@@ -89,6 +88,7 @@ python3 tools/league.py match cand build/v1.1 -g 400 -n 100000
 | Path | What |
 |---|---|
 | `bot.cpp` | The whole engine: search, evaluation, data generator (`#ifdef LOCAL`) |
+| `nets/` | Trained nets (`.bin`), with a table of sizes and versions |
 | `versions/` | Every submitted version as a single file. v1.x are complete; v2.0+ have the weight literal cut (they show the code, they do not compile) |
 | `tools/referee.cpp` | Fast native referee, mirrors the official Java one |
 | `tools/league.py` | Freeze versions, play matches, Elo |

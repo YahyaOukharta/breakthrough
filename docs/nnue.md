@@ -24,7 +24,7 @@ the [Stockfish NNUE guide](https://github.com/official-stockfish/nnue-pytorch/bl
 - **Output:** win-probability logit of the side to move; `× NN_SCALE (200)` gives search
   units, so 200 ≈ one logit.
 
-v3.0 net: 384 hidden, 4 buckets, 52k weights (not published).
+v3.0 net: 384 hidden, 4 buckets, 52k weights (`nets/n10b.bin`).
 
 ## Quantization and inference
 

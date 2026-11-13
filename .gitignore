@@ -14,5 +14,5 @@ kaggle/
 arena/
 tracker/
 
-# trained weights are not published
-nets/
+# float checkpoints stay local
+nets/*.pt
